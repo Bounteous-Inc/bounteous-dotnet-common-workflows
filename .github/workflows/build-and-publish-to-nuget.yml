@@ -1,0 +1,196 @@
+name: BuildAndPublishNuGet
+
+on:
+  workflow_call:
+    inputs:
+      nuget-package-name:
+        description: 'NuGet package name'
+        required: true
+        type: string
+      csproj-path:
+        description: 'Path to the .csproj file'
+        required: true
+        type: string
+      dotnet-version:
+        required: false
+        type: string
+        default: '8.0.x'
+      release-path:
+        required: false
+        type: string
+        default: 'net8.0'
+      build-configuration:
+        required: false
+        type: string
+        default: 'Release'
+    secrets:
+      NUGET_API_KEY:
+        required: true
+      NUGET_SOURCE_URI:
+        required: true
+
+env:
+  PACKAGES_DIR: ./packages
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Build Project
+        run: dotnet build ${{ inputs.csproj-path }} --configuration ${{ inputs.build-configuration }}
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: '**/bin/Release/${{ inputs.release-path }}'
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Test Project
+        run: dotnet test ${{ inputs.csproj-path }} --verbosity normal
+
+  version:
+    needs: setup
+    runs-on: ubuntu-latest
+    outputs:
+      next_version: ${{ steps.increment_version.outputs.next_version }}
+    steps:
+      - name: Check package and get version
+        id: get_version
+        run: |
+          PACKAGE_NAME="${{inputs.nuget-package-name}}"
+          DEFAULT_VERSION="0.0.1"
+
+          CURRENT_VERSION=$(curl -s "https://azuresearch-usnc.nuget.org/query?q=packageid:$PACKAGE_NAME&prerelease=false&semVerLevel=2.0.0" \
+            | jq -r '.data[0].versions[] | select(.version) | .version' \
+            | sort -V \
+            | tail -n1)
+          
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "No listed versions found. Using default version: $DEFAULT_VERSION"
+            CURRENT_VERSION=$DEFAULT_VERSION
+          else
+            echo "Current version of $PACKAGE_NAME: $CURRENT_VERSION"
+          fi
+
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+      - name: Increment version
+        id: increment_version
+        run: |
+          CURRENT_VERSION=${{ steps.get_version.outputs.version }}
+          IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+          NEW_PATCH=$((PATCH + 1))
+          NEXT_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version: $NEXT_VERSION"
+
+  tag:
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Create and Push Git Tag
+        run: |
+          git config --global user.email "greg@xerris.com"
+          git config --global user.name "Greg Cook"
+          NEXT_VERSION=${{ needs.version.outputs.next_version }}
+          TAG_NAME="v$NEXT_VERSION"
+          
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Removing existing local tag $TAG_NAME"
+            git tag -d "$TAG_NAME"
+          fi
+          
+          if git ls-remote --tags origin | grep -q "$TAG_NAME"; then
+            echo "Removing existing remote tag $TAG_NAME"
+            git push origin --delete "$TAG_NAME"
+          fi
+          
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+
+  pack:
+    needs: [setup, build, test, version, tag]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Pack NuGet package
+        run: |
+          mkdir -p $PACKAGES_DIR
+          dotnet pack ${{ inputs.csproj-path }} \
+          --configuration ${{ inputs.build-configuration }} \
+          /p:Version=${{ needs.version.outputs.next_version }} \
+          --output $PACKAGES_DIR
+          
+          if [ $? -ne 0 ]; then
+            echo "Error: dotnet pack command failed"
+            exit 1
+          fi
+      - name: List package directory
+        run: ls -R $PACKAGES_DIR
+      - name: Check for .nupkg file
+        run: |
+          if ! ls $PACKAGES_DIR/*.nupkg 1> /dev/null 2>&1; then
+            echo "Error: No .nupkg file found in $PACKAGES_DIR directory"
+            exit 1
+          fi
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: ${{ env.PACKAGES_DIR }}/*.nupkg
+
+  publish:
+    needs: [pack, version]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download NuGet package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: ${{ env.PACKAGES_DIR }}
+      - name: List package contents
+        run: ls -R ${{ env.PACKAGES_DIR }}
+      - name: Publish to NuGet
+        run: |
+          PACKAGE_FILE=$(find ${{ env.PACKAGES_DIR }} -name "*.nupkg" | head -n 1)
+          if [ -z "$PACKAGE_FILE" ]; then
+            echo "Error: No .nupkg file found in ${{ env.PACKAGES_DIR }} directory"
+            exit 1
+          fi
+          dotnet nuget push "$PACKAGE_FILE" \
+          --api-key ${{ secrets.NUGET_API_KEY }} \
+          --source "${{ secrets.NUGET_SOURCE_URI }}/v3/index.json" \
+          --timeout 360 \
+          --skip-duplicate
