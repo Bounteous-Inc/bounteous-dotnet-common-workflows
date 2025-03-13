@@ -58,7 +58,7 @@ jobs:
       - name: Run Trivy scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'mcr.microsoft.com/dotnet/aspnet:${{ inputs.dotnet-version }}'
+          image-ref: 'mcr.microsoft.com/dotnet/aspnet:8.0'
           format: 'sarif'
           output: 'trivy-results.sarif'
 
