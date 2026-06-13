@@ -179,6 +179,9 @@ jobs:
           path: ${{ env.PACKAGES_DIR }}
       - name: List package contents
         run: ls -R ${{ env.PACKAGES_DIR }}
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: nuget-login
       - name: Publish to NuGet
         run: |
           PACKAGE_FILE=$(find ${{ env.PACKAGES_DIR }} -name "*.nupkg" | head -n 1)
@@ -186,12 +189,8 @@ jobs:
             echo "Error: No .nupkg file found in ${{ env.PACKAGES_DIR }} directory"
             exit 1
           fi
-          NUGET_TOKEN=$(curl -s \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nuget.org" \
-            | jq -r '.value')
           dotnet nuget push "$PACKAGE_FILE" \
-            --api-key "$NUGET_TOKEN" \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
             --source "https://api.nuget.org/v3/index.json" \
             --timeout 360 \
             --skip-duplicate
