@@ -23,6 +23,10 @@ on:
         required: false
         type: string
         default: 'Release'
+    outputs:
+      next_version:
+        description: 'The next version that was packed (caller uses this when publishing)'
+        value: ${{ jobs.version.outputs.next_version }}
 
 env:
   PACKAGES_DIR: ./packages
@@ -165,95 +169,9 @@ jobs:
         with:
           name: nuget-package
           path: ${{ env.PACKAGES_DIR }}/*.nupkg
-
-  publish:
-    needs: [pack, version]
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-    steps:
-      - name: Download NuGet package
-        uses: actions/download-artifact@v4
-        with:
-          name: nuget-package
-          path: ${{ env.PACKAGES_DIR }}
-      - name: List package contents
-        run: ls -R ${{ env.PACKAGES_DIR }}
-      - name: NuGet login (OIDC → temp API key)
-        uses: NuGet/login@v1
-        id: nuget-login
-        with:
-          user: Bounteous
-      - name: Publish to NuGet
-        run: |
-          PACKAGE_FILE=$(find ${{ env.PACKAGES_DIR }} -name "*.nupkg" | head -n 1)
-          if [ -z "$PACKAGE_FILE" ]; then
-            echo "Error: No .nupkg file found in ${{ env.PACKAGES_DIR }} directory"
-            exit 1
-          fi
-          dotnet nuget push "$PACKAGE_FILE" \
-            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
-            --source "https://api.nuget.org/v3/index.json" \
-            --timeout 360 \
-            --skip-duplicate
-
-  update-version:
-    needs: [publish, version]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - name: Query NuGet for published version
-        id: get_published_version
-        run: |
-          PACKAGE_NAME="${{ inputs.nuget-package-name }}"
-          echo "Querying NuGet API for package: $PACKAGE_NAME"
-          
-          # Wait a few seconds for NuGet to index the new package
-          sleep 10
-          
-          PUBLISHED_VERSION=$(curl -s "https://azuresearch-usnc.nuget.org/query?q=packageid:$PACKAGE_NAME&prerelease=false&semVerLevel=2.0.0" \
-            | jq -r '.data[0].versions[] | select(.version) | .version' \
-            | sort -V \
-            | tail -n1)
-          
-          if [ -z "$PUBLISHED_VERSION" ]; then
-            echo "Warning: Could not retrieve published version from NuGet, using workflow version"
-            PUBLISHED_VERSION="${{ needs.version.outputs.next_version }}"
-          fi
-          
-          echo "Published version: $PUBLISHED_VERSION"
-          echo "published_version=$PUBLISHED_VERSION" >> $GITHUB_OUTPUT
-      - name: Update csproj version
-        run: |
-          PUBLISHED_VERSION="${{ steps.get_published_version.outputs.published_version }}"
-          CSPROJ_PATH="${{ inputs.csproj-path }}"
-          
-          echo "Updating $CSPROJ_PATH with version $PUBLISHED_VERSION"
-          
-          # Update the Version element in the csproj file
-          sed -i.bak "s|<Version>.*</Version>|<Version>$PUBLISHED_VERSION</Version>|g" "$CSPROJ_PATH"
-          rm -f "$CSPROJ_PATH.bak"
-          
-          # Show the changes
-          git diff "$CSPROJ_PATH"
-      - name: Commit version update
-        run: |
-          git config --global user.email "greg@xerris.com"
-          git config --global user.name "Greg Cook"
-          
-          PUBLISHED_VERSION="${{ steps.get_published_version.outputs.published_version }}"
-          
-          # Check if there are changes to commit
-          if git diff --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          
-          git add "${{ inputs.csproj-path }}"
-          git commit -m "[skip ci] Update version to $PUBLISHED_VERSION after NuGet publish"
-          git push origin main
+# Note: NuGet publish is intentionally NOT done here. Trusted Publishing
+# (NuGet/login OIDC) cannot match an org-owned package policy when invoked
+# from a reusable workflow — the OIDC job_workflow_ref points at this repo
+# while the policy is scoped to the caller. See NuGet/login issue #6.
+# The caller's own build-and-publish.yml performs the login + push directly,
+# then calls the reusable update-version.yml workflow.

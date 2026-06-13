@@ -1,0 +1,85 @@
+name: UpdateVersion
+
+# Reusable workflow: after a successful NuGet publish, query nuget.org for the
+# published version and commit it back into the .csproj. No NuGet credentials
+# or OIDC are needed here, so it is safe to keep reusable (unaffected by the
+# trusted-publishing reusable-workflow limitation in NuGet/login issue #6).
+
+on:
+  workflow_call:
+    inputs:
+      nuget-package-name:
+        description: 'NuGet package name'
+        required: true
+        type: string
+      csproj-path:
+        description: 'Path to the .csproj file'
+        required: true
+        type: string
+      fallback-version:
+        description: 'Version to use if NuGet has not indexed the package yet'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Query NuGet for published version
+        id: get_published_version
+        run: |
+          PACKAGE_NAME="${{ inputs.nuget-package-name }}"
+          echo "Querying NuGet API for package: $PACKAGE_NAME"
+
+          # Wait a few seconds for NuGet to index the new package
+          sleep 10
+
+          PUBLISHED_VERSION=$(curl -s "https://azuresearch-usnc.nuget.org/query?q=packageid:$PACKAGE_NAME&prerelease=false&semVerLevel=2.0.0" \
+            | jq -r '.data[0].versions[] | select(.version) | .version' \
+            | sort -V \
+            | tail -n1)
+
+          if [ -z "$PUBLISHED_VERSION" ]; then
+            echo "Warning: Could not retrieve published version from NuGet, using fallback"
+            PUBLISHED_VERSION="${{ inputs.fallback-version }}"
+          fi
+
+          echo "Published version: $PUBLISHED_VERSION"
+          echo "published_version=$PUBLISHED_VERSION" >> $GITHUB_OUTPUT
+      - name: Update csproj version
+        run: |
+          PUBLISHED_VERSION="${{ steps.get_published_version.outputs.published_version }}"
+          CSPROJ_PATH="${{ inputs.csproj-path }}"
+
+          if [ -z "$PUBLISHED_VERSION" ]; then
+            echo "No version available to write; skipping"
+            exit 0
+          fi
+
+          echo "Updating $CSPROJ_PATH with version $PUBLISHED_VERSION"
+          sed -i.bak "s|<Version>.*</Version>|<Version>$PUBLISHED_VERSION</Version>|g" "$CSPROJ_PATH"
+          rm -f "$CSPROJ_PATH.bak"
+
+          git diff "$CSPROJ_PATH"
+      - name: Commit version update
+        run: |
+          git config --global user.email "greg@xerris.com"
+          git config --global user.name "Greg Cook"
+
+          PUBLISHED_VERSION="${{ steps.get_published_version.outputs.published_version }}"
+
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git add "${{ inputs.csproj-path }}"
+          git commit -m "[skip ci] Update version to $PUBLISHED_VERSION after NuGet publish"
+          git push origin main
