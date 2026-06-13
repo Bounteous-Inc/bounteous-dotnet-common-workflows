@@ -65,6 +65,7 @@ jobs:
 
           echo "Updating $CSPROJ_PATH with version $PUBLISHED_VERSION"
           sed -i.bak "s|<Version>.*</Version>|<Version>$PUBLISHED_VERSION</Version>|g" "$CSPROJ_PATH"
+          sed -i.bak "s|<PackageVersion>.*</PackageVersion>|<PackageVersion>$PUBLISHED_VERSION</PackageVersion>|g" "$CSPROJ_PATH"
           rm -f "$CSPROJ_PATH.bak"
 
           git diff "$CSPROJ_PATH"

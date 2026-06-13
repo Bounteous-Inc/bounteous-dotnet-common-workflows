@@ -150,6 +150,7 @@ jobs:
           dotnet pack ${{ inputs.csproj-path }} \
           --configuration ${{ inputs.build-configuration }} \
           /p:Version=${{ needs.version.outputs.next_version }} \
+          /p:PackageVersion=${{ needs.version.outputs.next_version }} \
           --output $PACKAGES_DIR
           
           if [ $? -ne 0 ]; then
