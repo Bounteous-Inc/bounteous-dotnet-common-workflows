@@ -21,6 +21,14 @@ on:
         required: false
         type: string
         default: ''
+    secrets:
+      deploy-key:
+        description: >-
+          Optional SSH private key for a write-access deploy key on the calling repo.
+          Needed when main is protected by a ruleset that requires PRs: the ruleset
+          exempts deploy keys, so the version-bump commit can still be pushed.
+          When omitted, the push uses GITHUB_TOKEN as before.
+        required: false
 
 jobs:
   update-version:
@@ -28,10 +36,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      # With ssh-key set, checkout clones over SSH and configures git to push
+      # with that key; with it empty, checkout falls back to GITHUB_TOKEN.
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          ssh-key: ${{ secrets.deploy-key }}
       - name: Query NuGet for published version
         id: get_published_version
         run: |
